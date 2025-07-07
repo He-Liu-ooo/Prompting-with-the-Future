@@ -4,7 +4,4 @@
 __pycache__/
 
 output/
-gaussians/data/
-gaussians/colmap/
-
 results/
