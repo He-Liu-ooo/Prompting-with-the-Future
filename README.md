@@ -8,6 +8,7 @@ Official implementation of Prompting with the Future (RSS 2025). We provide a de
 ## Installation
 
 ### Requirements for running the demo
+Please download the pre-optimized gaussian splatting checkpoint and data from [here](https://drive.google.com/drive/folders/1HviE902s5g9fdUJHpfJ2HwhT4gy6kxi9?usp=sharing) and put them in the `gaussians/` folder.
 
 ```
 git clone https://github.com/prompting-with-the-future/prompting-with-the-future.git
