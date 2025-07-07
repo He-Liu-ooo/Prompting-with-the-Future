@@ -5,7 +5,6 @@ __pycache__/
 
 output/
 gaussians/data/
-gaussians/output/
 gaussians/colmap/
 
 results/
