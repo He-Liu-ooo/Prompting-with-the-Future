@@ -1,7 +1,2 @@
-/*.ply
-*.obj
-*.mtl
 __pycache__/
-
-output/
 results/
