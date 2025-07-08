@@ -23,7 +23,7 @@ conda install pytorch3d -c pytorch3d
 
 Please follow the instructions in [COLMAP](https://colmap.github.io/) and [2d Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) to install the dependency for reconstruction.
 
-Since the environment for SAM2[https://github.com/facebookresearch/sam2] is not compatible with the main environment and it is only used for reconstruction, we provide a separate environment for SAM2.
+Since the environment for [SAM2](https://github.com/facebookresearch/sam2) is not compatible with the main environment and it is only used for reconstruction, we provide a separate environment for SAM2.
 
 ```
 conda create -n sam2 python=3.10.0
@@ -33,7 +33,7 @@ pip install -e .
 ```
 
 ## Run our demo
-We prepared one scaned environment for testing the Prompting with the Future.
+We prepared a scanned environment for testing the Prompting with the Future.
 
 ``` 
 python main.py --scene_name basket_world --instruction "put the green cucumber into the basket"
@@ -44,7 +44,7 @@ The resulting trajectory and joint actions will be saved in the `results` folder
 ## Scan your own environment
 We provide two ways to scan your own environment for open-world manipulation.
 
-### 1. Scan with an phone (recommended)
+### 1. Scan with a phone (recommended)
 Firstly, print a checkerboard (utils/reconstruct/checker_board.svg) and put it in the workspace.
 
 Then, use a phone camera to flexibly scan your environment. (60fps is recommended)
@@ -60,7 +60,7 @@ sh build.sh {SCENE_NAME} {INSTRUCTION}
 ### 2. Scan with a robot
 We also provide a script to use the robot to scan your environment.
 
-Due to different robot platforms, we provide an example script on Droid[https://droid-dataset.github.io/] setup for scanning with a robot.
+Due to different robot platforms, we provide an example script on [Droid](https://droid-dataset.github.io/) setup for scanning with a robot.
 
 You can adapt the `utils/reconstruct/robot_scan.py` script for your own robot.
 
