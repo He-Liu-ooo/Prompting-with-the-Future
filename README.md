@@ -24,7 +24,7 @@ Please add your ChatGPT API key in the `utils/prompt_gpt.py` script.
 
 ### Requirements for scanning your own environment
 
-Please follow the instructions in [COLMAP](https://colmap.github.io/) and [2d Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) to install the dependencies for reconstruction.
+Please follow the instructions in [COLMAP](https://colmap.github.io/) to install the dependencies for reconstruction.
 
 Since the environment for [SAM2](https://github.com/facebookresearch/sam2) is not compatible with the main environment and it is only used for reconstruction, we provide a separate environment for SAM2.
 
