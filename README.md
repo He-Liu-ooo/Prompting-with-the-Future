@@ -67,7 +67,7 @@ Due to different robot platforms, we provide an example script on [Droid](https:
 
 You can adapt the `utils/reconstruct/robot_scan.py` script for your own robot.
 
-## Post-processing (optional)
+### 3. Post-processing (optional)
 We found that VLMs are quite robust to the artifacts in the reconstructed scene.
 However, we still provide a post-processing step to improve the visual quality.
 
@@ -75,17 +75,11 @@ Change the `box` parameters in the `gaussians/gaussian_world.py` script to the b
 
 The post-processing flag will also fill the holes under the objects.
 
-## Planning
-Start the planning by running the following command.
+### 4. Planning
+Start the planning on your scanned environment by running the following command.
 
 ```
 python main.py --scene_name {SCENE_NAME} --instruction {INSTRUCTION} --name {EXP_NAME}
-```
-
-For example, to run our demo:
-
-```
-python main.py --scene_name basket_world --instruction "put the green cucumber into the basket" --name demo
 ```
 
 ## Citation
