@@ -20,9 +20,11 @@ conda install pytorch3d -c pytorch3d
 
 Please download the pre-optimized gaussian splatting checkpoint and data from [here](https://drive.google.com/drive/folders/1HviE902s5g9fdUJHpfJ2HwhT4gy6kxi9?usp=sharing) and put them in the `gaussians/` folder.
 
+Please add your ChatGPT API key in the `utils/prompt_gpt.py` script.
+
 ### Requirements for scanning your own environment
 
-Please follow the instructions in [COLMAP](https://colmap.github.io/) and [2d Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) to install the dependency for reconstruction.
+Please follow the instructions in [COLMAP](https://colmap.github.io/) and [2d Gaussian Splatting](https://github.com/hbb1/2d-gaussian-splatting) to install the dependencies for reconstruction.
 
 Since the environment for [SAM2](https://github.com/facebookresearch/sam2) is not compatible with the main environment and it is only used for reconstruction, we provide a separate environment for SAM2.
 
@@ -43,7 +45,7 @@ python main.py --scene_name basket_world --instruction "put the green cucumber i
 The resulting trajectory and joint actions will be saved in the `results` folder.
 
 ## Scan your own environment
-We provide two ways to scan your own environment for open-world manipulation.
+We provide two ways to scan your environment for open-world manipulation.
 
 ### 1. Scan with a phone (recommended)
 Firstly, print a checkerboard (utils/reconstruct/checker_board.svg) and put it in the workspace.
@@ -74,8 +76,7 @@ Change the `box` parameters in the `gaussians/gaussian_world.py` script to the b
 The post-processing flag will also fill the holes under the objects.
 
 ## Planning
-Add your chatGPT API key in the `utils/prompt_gpt.py` script.
-Start the planning on your own environment by running the following command.
+Start the planning by running the following command.
 
 ```
 python main.py --scene_name {SCENE_NAME} --instruction {INSTRUCTION} --name {EXP_NAME}
