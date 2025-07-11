@@ -47,7 +47,7 @@ The resulting trajectory and joint actions will be saved in the `results` folder
 ## Scan your own environment
 We provide two ways to scan your environment for open-world manipulation.
 
-### 1. Scan with a phone (recommended)
+### 1a. Scan with a phone (recommended)
 Firstly, print a checkerboard (utils/reconstruct/checker_board.svg) and put it in the workspace.
 
 Then, use a phone camera to flexibly scan your environment. (60fps is recommended)
@@ -60,14 +60,14 @@ Run the following script to reconstruct the interactive digital twin with movabl
 sh build.sh {SCENE_NAME} {INSTRUCTION}
 ```
 
-### 2. Scan with a robot
+### 1b. Scan with a robot
 We also provide a script to use the robot to scan your environment.
 
 Due to different robot platforms, we provide an example script on [Droid](https://droid-dataset.github.io/) setup for scanning with a robot.
 
 You can adapt the `utils/reconstruct/robot_scan.py` script for your own robot.
 
-### 3. Post-processing (optional)
+### 2. Post-processing (optional)
 We found that VLMs are quite robust to the artifacts in the reconstructed scene.
 However, we still provide a post-processing step to improve the visual quality.
 
@@ -75,7 +75,7 @@ Change the `box` parameters in the `gaussians/gaussian_world.py` script to the b
 
 The post-processing flag will also fill the holes under the objects.
 
-### 4. Planning
+### 3. Planning
 Start the planning on your scanned environment by running the following command.
 
 ```
