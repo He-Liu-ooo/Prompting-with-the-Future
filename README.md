@@ -14,6 +14,7 @@ git clone https://github.com/prompting-with-the-future/prompting-with-the-future
 cd prompting-with-the-future
 conda env create --file environment.yaml
 conda activate pwf
+pip install --upgrade mani_skill
 conda install pytorch3d -c pytorch3d
 ```
 
