@@ -23,3 +23,6 @@ dependencies:
     - plyfile
     - coacd
     - opencv-python
+    - mani_skill
+    - gaussians/submodules/diff-surfel-rasterization
+    - gaussians/submodules/simple-knn
