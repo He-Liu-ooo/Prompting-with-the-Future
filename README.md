@@ -82,6 +82,12 @@ Start the planning by running the following command.
 python main.py --scene_name {SCENE_NAME} --instruction {INSTRUCTION} --name {EXP_NAME}
 ```
 
+For example, to run our demo:
+
+```
+python main.py --scene_name basket_world --instruction "put the green cucumber into the basket" --name demo
+```
+
 ## Citation
 If you find our code or paper is useful, please consider citing:
 ```bibtex
