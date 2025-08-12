@@ -76,7 +76,7 @@ action_ids = [2]
 
 max_replan = 5
 
-gaussian_world = GaussianWorld(scene_name, parser, post_process=True)
+gaussian_world = GaussianWorld(scene_name, parser, post_process=False)
 center = np.array([0, 0, 0])
 radius = gaussian_world.radius * distance
 
