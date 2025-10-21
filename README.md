@@ -1,5 +1,5 @@
 # Prompting with the Future: Open-World Model Predictive Control with Interactive Digital Twins
-[Project Page](https://prompting-with-the-future.github.io/) [Paper](https://arxiv.org/pdf/2506.13761)
+[Project Page](https://prompting-with-the-future.github.io/) | [Paper](https://arxiv.org/pdf/2506.13761)
 
 <img  src="intro.gif" width="800">
 
