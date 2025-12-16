@@ -1,0 +1,6 @@
+build/
+*.so
+.vscode
+**__pycache__**
+*.pyc
+simple_knn.egg-info/

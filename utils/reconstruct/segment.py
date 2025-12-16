@@ -4,7 +4,7 @@ sys.path.append("../../sam2")
 sys.path.append("../")
 from sam2.sam2_video_predictor import SAM2VideoPredictor
 from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
-from prompt_gpt import generate_segment_names, get_names
+from prompt_deepseek import generate_segment_names, get_names
 import numpy as np
 import torch
 import cv2

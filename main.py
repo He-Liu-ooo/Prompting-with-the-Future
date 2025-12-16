@@ -2,6 +2,7 @@ import os
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+# encode figures to base64 to prompt VLM (embedding figures in text)
 import base64
 import time
 import argparse
@@ -11,9 +12,10 @@ from meshes.mesh_world import MeshWorld
 from utils.prompt import *
 from utils.camera import get_up_direction
 
-from utils.prompt_gpt import *
+from utils.prompt_deepseek import *
 from gaussians.gaussian_world import GaussianWorld
 
+# camera construction
 from pytorch3d.renderer import look_at_view_transform
 
 def robo4d_parse():
@@ -21,7 +23,7 @@ def robo4d_parse():
     parser.add_argument("--scene_name", type=str, default="basket_world")
     parser.add_argument("--instruction", type=str, default="put the green cucumber into the basket")
     parser.add_argument("--name", type=str, default='demo')
-    parser.add_argument("--image_size", type=int, default=500)
+    parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--total_steps", type=int, default=10)
     parser.add_argument("--camera_view_id", type=int, default=1)
     parser.add_argument("--plane_action", action="store_true")
@@ -40,8 +42,10 @@ args = parser.parse_args()
 
 # render settings
 image_size = args.image_size
+# ignore the object too close (znear) or too far (zfar) to camera
 znear = 0.01
 zfar = 100
+# Field of View, in degrees
 FoV = 60
 
 if args.scene_name is None:
@@ -69,17 +73,23 @@ success_prompt = get_success_prompt(args)
 
 previous_instruction = args.instruction
 
+# decide how far is the camera to the center of the scene
 distance = 1.5
 scene_name = args.scene_name
+# where to put the robot
 robot_translation = [-0.45, 0.0, 0.0]
+# maybe some action constraints
 action_ids = [2]
 
 max_replan = 5
 
+# NOTE
 gaussian_world = GaussianWorld(scene_name, parser, post_process=False)
+# reference center of camera
 center = np.array([0, 0, 0])
 radius = gaussian_world.radius * distance
 
+""" Prompt VLM to decide whether to keep gripper closed for the whole manipulation proces """
 change = None
 close_gripper = False
 times = 0
@@ -99,12 +109,18 @@ with open(f'{output_path}/close_gripper_content.txt', 'w') as f:
 if close_gripper:
     print('!!! Keep Gripper Closed !!!')
 
+
+""" Get subgoals from VLM """
 robot_uids = 'PandaRobotiqHand'
 
 # camera config
+# elevation angles of 4 fixed cameras
 elev = torch.tensor([-70, 0, 70, 0], device=device)
+# azimuth angles of 4 fixed cameras
 azim = torch.tensor([0, 70, 0, 0], device=device)
+# decide the vertical up direction of the camera
 up = get_up_direction(elev, azim)
+# where to look at
 at = torch.tensor(center[None], device=device).float()
 
 cameras_config = []
@@ -115,6 +131,7 @@ for i in range(4):
     })
 
 # gaussian camera config
+# describe the pose of every camera in world coordinate
 R_fixed, T_fixed = look_at_view_transform(dist=radius, elev=elev, azim=azim, up=up, at=at, device=device)
 up[:, 0] = -up[:, 0]
 at[:, 0] = -at[:, 0]
@@ -123,9 +140,10 @@ R_gaussian_fixed, T_gaussian_fixed = look_at_view_transform(dist=radius, elev=el
 R_gaussian_fixed = R_gaussian_fixed.numpy()
 T_gaussian_fixed = T_gaussian_fixed.numpy()
 
+# which dimensions the action can move in the camera view plane
 plane_action_dimensions = [[0, 2], [1, 2], [0, 2], [0, 1]]
 
-# build mesh world
+# NOTE: build mesh world
 mesh_world = MeshWorld(scene_name, num_envs=args.num_sample_actions, scene_traslation=-np.array(robot_translation), radius=radius, \
                        image_size=image_size, record_video=args.record_video, robot_uids=robot_uids, need_render=True, dir=output_path, \
                         close_gripper=close_gripper, cameras_config=cameras_config)
@@ -133,6 +151,7 @@ mesh_world = MeshWorld(scene_name, num_envs=args.num_sample_actions, scene_trasl
 success = False
 trajectory = []
 history = []
+# the rendered frame generated at each action execution & real frame
 excute_frames = []
 history_object_states = []
 output_actions = []
@@ -141,14 +160,18 @@ replan_time = 0
 if close_gripper:
     output_actions.append('grasp')
 
+# initial robot joint angles in simulation
 initial_joint_angles = mesh_world.agent.robot.get_qpos()[0].cpu().numpy().tolist()
 print('initial_joint_angles: ', initial_joint_angles)
 trajectory.append(torch.tensor(initial_joint_angles))
 
 encoded_image = None
 
+# NOTE: get images from mesh world, the mesh world is constructed based on COLMAP reconstruction from real world
 robot_images, robot_depth_images = mesh_world.get_image_depth()
 current_robot_images, current_robot_depths = robot_images, robot_depth_images
+# robot is usually not included in the gaussian world rendering
+# NOTE: gaussian reconstruction is based on real images from cameras of various angles and ouput of Colmap
 rgbmaps, depthmaps, alphamaps = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, rotate_num=4)
 depthmaps[np.where(depthmaps == 0)] = zfar
 current_robot_depths[np.where(current_robot_depths == 0)] = zfar
@@ -157,14 +180,18 @@ current_robot_images = current_robot_images[:, 0, ...]
 current_robot_depths = current_robot_depths[:, 0, ..., 0]
 
 robot_mask = np.where((np.any(current_robot_images != 0, axis=-1)) * (current_robot_depths < depthmaps), 1, 0)
+# blend robot image (pre-rendering) and gaussian rendered image
+# 
 current_images = np.where(robot_mask[:, :, :, None], current_robot_images, rgbmaps)
 
 excute_frames.append(current_images[args.camera_view_id])
 
 encoded_images = []
 for i in range(len(current_images)):
-    plt.imsave(f'{output_path}/subgoal_view_{i + 1}.png', current_images[i])
-    with open(f'{output_path}/subgoal_view_{i + 1}.png', 'rb') as image_file:
+    # plt.imsave(f'{output_path}/subgoal_view_{i + 1}.png', current_images[i])
+    # with open(f'{output_path}/subgoal_view_{i + 1}.png', 'rb') as image_file:
+    plt.imsave(f'{output_path}/init_executed_frame_view_{i + 1}.png', current_images[i])
+    with open(f'{output_path}/init_executed_frame_view_{i + 1}.png', 'rb') as image_file:
         encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
     encoded_images.append([encoded_image])
 
@@ -190,6 +217,7 @@ for goal_id, goal in enumerate(subgoals):
 
 stage_prompt = stage_prompt.replace('<subgoal>', stages_text)
 
+""" Main loop """
 subgoal_id = 0
 
 view_id = args.camera_view_id
@@ -198,9 +226,11 @@ object_transformations = []
 while len(trajectory) <= args.total_steps:
     grasp = release = False
 
-    # render the current state
+    """ Render the current state """
+    # NOTE
     robot_images, robot_depth_images = mesh_world.get_image_depth()
     current_robot_images, current_robot_depths = robot_images, robot_depth_images
+    # NOTE
     rgbmaps, depthmaps, alphamaps = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, object_states=object_transformations, rotate_num=4)
     depthmaps[np.where(depthmaps == 0)] = zfar
     current_robot_depths[np.where(current_robot_depths == 0)] = zfar
@@ -212,15 +242,17 @@ while len(trajectory) <= args.total_steps:
     current_images = np.where(robot_mask[:, :, :, None], current_robot_images, rgbmaps)
 
     for i in range(len(current_images)):
-        plt.imsave(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', current_images[i])
+        plt.imsave(f'{output_path}/traj_{len(trajectory)}_executed_frame_view_{i + 1}.png', current_images[i])
+        # plt.imsave(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', current_images[i])
 
     encoded_images = []
     for i in range(len(current_images)):
-        with open(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', 'rb') as image_file:
+        # with open(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', 'rb') as image_file:
+        with open(f'{output_path}/traj_{len(trajectory)}_executed_frame_view_{i + 1}.png', 'rb') as image_file:
             encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
         encoded_images.append([encoded_image])
     
-    # check success
+    """ Check success """
     try_time = 0
     change = None
     while change is None and try_time < 5:
@@ -233,7 +265,8 @@ while len(trajectory) <= args.total_steps:
             print('catched', e)
             pass
 
-    with open(f'{output_path}/{len(trajectory)}_success_content.txt', 'w') as f:
+    # with open(f'{output_path}/{len(trajectory)}_success_content.txt', 'w') as f:
+    with open(f'{output_path}/traj_{len(trajectory)}_success_content.txt', 'w') as f:
         f.write(content)
     
     if success:
@@ -253,13 +286,16 @@ while len(trajectory) <= args.total_steps:
         if success:
             print('!!! Success !!!')
             break
-
+    
+    # I think here is duplicated encoding
     encoded_images = []
     for i in range(len(current_images)):
-        with open(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', 'rb') as image_file:
+        with open(f'{output_path}/traj_{len(trajectory)}_executed_frame_view_{i + 1}.png', 'rb') as image_file:
+        # with open(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', 'rb') as image_file:
             encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
         encoded_images.append([encoded_image])
 
+    """ Decide current stage """
     try_time = 0
     change = None
     while change is None and try_time < 5:
@@ -272,20 +308,22 @@ while len(trajectory) <= args.total_steps:
             print('catched', e)
             pass
         
-    with open(f'{output_path}/{len(trajectory)}_stage_content.txt', 'w') as f:
+    with open(f'{output_path}/traj_{len(trajectory)}_stage_content.txt', 'w') as f:
+    # with open(f'{output_path}/{len(trajectory)}_stage_content.txt', 'w') as f:
         f.write(content)
 
     subgoal_id = stage - 1
 
     print('current stage: ', stage)
-        
-    # give subgoal to system prompt
+    
+    """ Give subgoal to system prompt """
     system_prompt = system_prompt.replace(previous_instruction, subgoals[subgoal_id])
     select_prompt = select_prompt.replace(previous_instruction, subgoals[subgoal_id])
     release_prompt = release_prompt.replace(previous_instruction, subgoals[subgoal_id])
     grasp_prompt = grasp_prompt.replace(previous_instruction, subgoals[subgoal_id])
     previous_instruction = subgoals[subgoal_id]
 
+    """ If already grasping, ask whether to release """
     # sample release action
     if mesh_world.grasping_now:
         joint_angles_list, action_object_transformations, robot_images, robot_depth_images = mesh_world.release()
@@ -304,8 +342,10 @@ while len(trajectory) <= args.total_steps:
 
         encoded_images = []
         for i in range(len(current_images)):
-            plt.imsave(f'{output_path}/{len(trajectory)}_release_{i + 1}.png', current_images[i])
-            with open(f'{output_path}/{len(trajectory)}_release_{i + 1}.png', 'rb') as image_file:
+            # plt.imsave(f'{output_path}/{len(trajectory)}_release_{i + 1}.png', current_images[i])
+            # with open(f'{output_path}/{len(trajectory)}_release_{i + 1}.png', 'rb') as image_file:
+            plt.imsave(f'{output_path}/traj_{len(trajectory)}_sim_frame_release_view_{i + 1}.png', current_images[i])
+            with open(f'{output_path}/traj_{len(trajectory)}_sim_frame_release_view_{i + 1}.png', 'rb') as image_file:
                 encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
             encoded_images.append([encoded_image])
 
@@ -322,7 +362,8 @@ while len(trajectory) <= args.total_steps:
                 print('catched', e)
                 pass
         
-        with open(f'{output_path}/{len(trajectory)}_release_content.txt', 'w') as f:
+        with open(f'{output_path}/traj_{len(trajectory)}_release_content.txt', 'w') as f:
+        # with open(f'{output_path}/{len(trajectory)}_release_content.txt', 'w') as f:
             f.write(content)
 
         if release:
@@ -333,12 +374,14 @@ while len(trajectory) <= args.total_steps:
     if release:
         continue
 
+    """ Select view """
     # select view
     encoded_images = []
     for i in range(len(R_fixed)):
         if i == view_id:
             continue
-        with open(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', 'rb') as image_file:
+        with open(f'{output_path}/traj_{len(trajectory)}_executed_frame_view_{i + 1}.png', 'rb') as image_file:
+        # with open(f'{output_path}/{len(trajectory)}_view_{i + 1}.png', 'rb') as image_file:
             encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
         encoded_images.append([encoded_image])
     
@@ -354,7 +397,8 @@ while len(trajectory) <= args.total_steps:
             pass
 
     # save content
-    with open(f'{output_path}/{len(trajectory)}_view_content.txt', 'w') as f:
+    with open(f'{output_path}/traj_{len(trajectory)}_view_content.txt', 'w') as f:
+    # with open(f'{output_path}/{len(trajectory)}_view_content.txt', 'w') as f:
         f.write(content)
     
     chosen_view_id = chosen_view_id - 1
@@ -370,6 +414,7 @@ while len(trajectory) <= args.total_steps:
     R_gaussian = R_gaussian_fixed[view_id: view_id + 1]
     T_gaussian = T_gaussian_fixed[view_id: view_id + 1]
 
+    """ Generate initial action candidates from Gaussian distribution """
     action_dimenstions = 6
     means = np.zeros(action_dimenstions)
     variances = np.ones(action_dimenstions) * 0.5
@@ -388,6 +433,7 @@ while len(trajectory) <= args.total_steps:
     covariance = np.zeros((action_dimenstions, action_dimenstions))
     np.fill_diagonal(covariance, variances)
 
+    """ Loop to iteratively refine action distribution with CEM and VLM feedback """
     for iteration in range(args.cem_iteration):
         prev_time = time.time()
         prompt = []
@@ -397,7 +443,10 @@ while len(trajectory) <= args.total_steps:
         release = False
 
         if not mesh_world.grasping_now:
+            """ Simulate action """
+            # NOTE: mesh world simulation
             joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images, grasp_object_transformations, grasp_robot_images, grasp_robot_depth_images, is_grasping = mesh_world.sample_action_distribution_batch(samples, try_grasp=True)
+            """ If some samples indicate grasping in simulation world, use VLM to decide whether a true grasp should happen, if yes, break the CEM loop """
             if is_grasping.sum():
                 print(f'{is_grasping.sum()} could grasp!')
                 grasp_object_transformations = grasp_object_transformations[is_grasping]
@@ -405,6 +454,7 @@ while len(trajectory) <= args.total_steps:
                 grasp_robot_depth_images = grasp_robot_depth_images[:, is_grasping]
                 rgbmaps, depthmaps, alphamaps = [], [], []
                 for grasp_id in range(len(grasp_object_transformations)):
+                    # NOTE
                     rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, object_states=grasp_object_transformations[grasp_id], rotate_num=4)
                     depthmap[np.where(depthmap == 0)] = zfar
 
@@ -428,8 +478,10 @@ while len(trajectory) <= args.total_steps:
                     # print('img_views: ', img_views.shape)
                     encoded_images = []
                     for idx, img in enumerate(img_views):
-                        plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', img)
-                        with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                        plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', img)
+                        # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', img)
+                        with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                        # with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
                             encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
                         encoded_images.append(encoded_image)
 
@@ -445,7 +497,8 @@ while len(trajectory) <= args.total_steps:
                             print('catched', e)
                             pass
                     
-                    with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_content.txt', 'w') as f:
+                    with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_content.txt', 'w') as f:
+                    # with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_content.txt', 'w') as f:
                         f.write(content)
 
                     if grasp:
@@ -455,10 +508,14 @@ while len(trajectory) <= args.total_steps:
                     break
 
         elif args.try_release and mesh_world.grasping_now and subgoal_id == len(subgoals) - 1:
+            """ Simulate action """
+            """ If this is the last subgoal and already grasping, try release, use VLM to decide whether a true release should happen, if yes, break the CEM loop """
+            # NOTE
             joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images, release_object_transformations, release_robot_images, release_robot_depth_images = mesh_world.sample_action_distribution_batch(samples, try_release=True)
 
             rgbmaps, depthmaps, alphamaps = [], [], []
             for release_id in range(len(release_object_transformations)):
+                # NOTE
                 rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, object_states=release_object_transformations[release_id], rotate_num=4)
                 depthmap[np.where(depthmap == 0)] = zfar
 
@@ -484,8 +541,10 @@ while len(trajectory) <= args.total_steps:
                 img_views = images[:, release_id]
                 encoded_images = []
                 for idx, img in enumerate(img_views):
-                    plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', img)
-                    with open(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                    # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', img)
+                    plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', img)
+                    with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                    # with open(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
                         encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
                     encoded_images.append([encoded_image])
 
@@ -499,7 +558,8 @@ while len(trajectory) <= args.total_steps:
             for p in processes:
                 release_id, release, content = queue.get()
 
-                with open(f'{output_path}/{len(trajectory)}_{iteration}_{release_id + 1}_release.txt', 'w') as f:
+                with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_{release_id + 1}_release.txt', 'w') as f:
+                # with open(f'{output_path}/{len(trajectory)}_{iteration}_{release_id + 1}_release.txt', 'w') as f:
                     f.write(content)
                 if release:
                     means = post_samples[release_id]
@@ -509,6 +569,8 @@ while len(trajectory) <= args.total_steps:
                 break
 
         else:
+            """ Simulate action """
+            # NOTE
             joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images = mesh_world.sample_action_distribution_batch(samples)
         
         robot_images = robot_images[view_id]
@@ -526,6 +588,7 @@ while len(trajectory) <= args.total_steps:
 
         rgbmaps, depthmaps, alphamaps = [], [], []
         for act_id, joint_angles in enumerate(joint_angles_list):
+            # NOTE
             rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian, T_gaussian, image_size, -FoV / 180.0 * np.pi, device, object_states=action_object_transformations[act_id], rotate_num=1)
             depthmap[np.where(depthmap == 0)] = zfar
 
@@ -543,9 +606,11 @@ while len(trajectory) <= args.total_steps:
         vis_images = []
         for act_id, img in enumerate(images):
             vis_images.append(img.copy())
-            plt.imsave(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', img)
+            plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_act_{act_id + 1}.png', img)
+            # plt.imsave(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', img)
             
-            with open(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', 'rb') as image_file:
+            with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_act_{act_id + 1}.png', 'rb') as image_file:
+            # with open(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', 'rb') as image_file:
                 prompt.append([base64.b64encode(image_file.read()).decode('utf-8')])
         
         print('iteration: ', iteration, 'render time: ', time.time() - prev_time)
@@ -559,7 +624,8 @@ while len(trajectory) <= args.total_steps:
             vis_all_images.append(vis_group_images)
         vis_all_images = np.concatenate(vis_all_images, axis=0)
 
-        plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_all.png', vis_all_images)
+        plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_all.png', vis_all_images)
+        # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_all.png', vis_all_images)
 
         prev_time = time.time()
 
@@ -582,7 +648,8 @@ while len(trajectory) <= args.total_steps:
             best_id = answer - 1
             best_of_each_group.append(group_id * args.num_sample_each_group + best_id)
 
-            with open(f'{output_path}/{len(trajectory)}_{iteration}_{group_id}_response.txt', 'w') as f:
+            with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_group_{group_id}_response.txt', 'w') as f:
+            # with open(f'{output_path}/{len(trajectory)}_{iteration}_{group_id}_response.txt', 'w') as f:
                 f.write(content)
         
         elite_samples = post_samples[best_of_each_group]
@@ -592,6 +659,7 @@ while len(trajectory) <= args.total_steps:
         print('iteration: ', iteration, 'prompt time: ', time.time() - prev_time)
         start_time = time.time()
 
+    """ Use mesh simulation to replace real-world execution """
     joint_angles_list, action_object_transformations, robot_images, robot_depth_images = mesh_world.sample_action_distribution_batch(means[None], non_stop=True)
 
     # save actions
@@ -629,13 +697,17 @@ while len(trajectory) <= args.total_steps:
     images = images[:, :, :, :3]
 
     # save trajectory image
-    plt.imsave(f'{output_path}/{len(trajectory)}.png', images[0])
-    with open(f'{output_path}/{len(trajectory)}.png', 'rb') as image_file:
+    # plt.imsave(f'{output_path}/{len(trajectory)}.png', images[0])
+    # with open(f'{output_path}/{len(trajectory)}.png', 'rb') as image_file:
+    plt.imsave(f'{output_path}/traj_{len(trajectory)}_executed_frame.png', images[0])
+    with open(f'{output_path}/traj_{len(trajectory)}_executed_frame.png', 'rb') as image_file:
         encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
     
+    """ Append executed frames (real-world) """
     excute_frames.append(images[0])
     trajectory.append(joint_angles_list[0])
 
+    """ Decide whether to replan, if yes, everything is roll back to the last step """
     if args.replan and replan_time < max_replan:
         if mesh_world.object_drop:
             print('object drop replan!')

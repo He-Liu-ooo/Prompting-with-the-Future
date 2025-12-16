@@ -1,2 +1,6 @@
 __pycache__/
 results/
+gaussians/__pycache__/
+gaussians/data/
+gaussians/output/
+.vscode/
