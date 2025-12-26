@@ -1,0 +1,1 @@
+tensorboard --logdir /home/hel19/workspace/repos/neural_network/Prompting-with-the-Future/profiling_results/2025-12-16-16-06/

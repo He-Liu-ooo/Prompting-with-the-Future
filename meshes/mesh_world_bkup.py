@@ -3,13 +3,9 @@ import mani_skill.envs
 import meshes.mesh
 import numpy as np
 import torch
-import time
 from mani_skill.utils.wrappers.record import RecordEpisode
 import copy
 from scipy.spatial.transform import Rotation as R
-
-from datetime import datetime
-import os
 
 
 def quaternion_multiply(a, b):
@@ -290,12 +286,8 @@ class MeshWorld:
 
         print('--- mesh world built ---')
 
-    def sample_action_distribution_batch(self, samples, non_stop=False, try_grasp=False, try_release=False, need_info=False, profile=False):
+    def sample_action_distribution_batch(self, samples, non_stop=False, try_grasp=False, try_release=False, need_info=False):
         ''' sample delte actions, return joint angles '''
-        
-        if profile:
-            func_start = time.perf_counter()
-            
         gripper_delta = self.grasping_pos
         # print('gripper_delta before sample: ', gripper_delta)
         samples = np.clip(samples, -10, 10)
@@ -339,64 +331,13 @@ class MeshWorld:
         prev_qpos = self.agent.robot.get_qpos()
         joint_angles_list = prev_qpos
 
-        # timing accumulators (optional)
-        if profile:
-            timings = {
-                'total': 0.0,
-                'loop_env_step': 0.0,
-                'loop_crash_check': 0.0,
-                'loop_collision_check': 0.0,
-                'loop_gripper_force': 0.0,
-                'loop_other': 0.0,
-                'post_wait': 0.0,
-                'object_transform': 0.0,
-            }
-
-            def _print_timings():
-                timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
-                profile_dir = os.path.join("profiling_results")
-                os.makedirs("profiling_results", exist_ok=True)
-                
-                timings['total'] = time.perf_counter() - func_start
-                # compute 'other' as total minus all measured parts
-                measured_keys = ['loop_env_step', 'loop_crash_check', 'loop_collision_check', 'loop_gripper_force', 'object_transform', 'post_wait', 'loop_other']
-                other_sum = sum(timings.get(k, 0.0) for k in measured_keys)
-                timings['other'] = max(0.0, timings['total'] - other_sum)
-                print('--- mesh_world sample_action_distribution_batch profile ---')
-                lines = []
-                lines.append('--- mesh_world sample_action_distribution_batch profile ---\n')
-                for k in ['total', 'other'] + measured_keys:
-                    line = f"{k:16s}: {timings.get(k, 0.0):.6f}s\n"
-                    print(line.strip())
-                    lines.append(line)
-                lines.append('-----------------------------------------------\n')
-
-                # write profile to file in profile_dir
-                file_path = os.path.join(profile_dir, f"mesh_world_sample_action_distribution_batch_{timestamp}.txt")
-                try:
-                    with open(file_path, 'w') as f:
-                        f.writelines(lines)
-                except Exception as e:
-                    print(f"Failed to write profiling file {file_path}: {e}")
-
         for i in range(times):
-            loop_start = time.perf_counter()
-            t0 = time.perf_counter()
-            # Prefer calling the unwrapped env when passing a profiling flag because
-            # some wrappers (e.g. RecordEpisode) don't accept an extra positional
-            # argument. If that fails, fall back to the public API without profile.
-            obs, _, _, _, _ = self.env.unwrapped.step(sampled_delta_actions, profile=(profile and (i == 0)))
-            if profile:
-                timings['loop_env_step'] += time.perf_counter() - t0
-            this_loop_env_step = time.perf_counter() - t0
+
+            obs, _, _, _, _ = self.env.step(sampled_delta_actions)
 
             # if not non_stop:
             # check if IK failed
-            t1 = time.perf_counter()
             current_qpos = self.agent.robot.get_qpos()
-            if profile:
-                timings['loop_crash_check'] += time.perf_counter() - t1
-            this_loop_crash_check = time.perf_counter() - t1
             crash_mask = (np.min(current_qpos[:, :7].cpu().numpy() - self.joint_limits[0], axis=-1) < self.joint_threshold) | (np.min(self.joint_limits[1] - current_qpos[:, :7].cpu().numpy(), axis=-1) < self.joint_threshold)
             # print('crash_mask: ', crash_mask.shape)
             # print('max_diff: ', torch.max(current_qpos - prev_qpos, dim=-1)[0])
@@ -412,11 +353,7 @@ class MeshWorld:
             all_crash_mask[new_crash] = True
 
             # check collision
-            t2 = time.perf_counter()
             collision_force = self.check_collision()
-            if profile:
-                timings['loop_collision_check'] += time.perf_counter() - t2
-            this_loop_collision_check = time.perf_counter() - t2
 
             # collision[left_collision > self.min_force] = True
             # collision[right_collision > self.min_force] = True
@@ -430,18 +367,13 @@ class MeshWorld:
             all_collision_mask[new_collision] = True
 
             # check touch
-            t3 = time.perf_counter()
             for obj_id, obj in enumerate(self.env.unwrapped.objects):
-                left_touch, right_touch = self.get_loop_gripper_force(obj)
+                left_touch, right_touch = self.get_gripper_force(obj)
 
                 touched[obj_id][left_touch > self.min_force] = True
                 touched[obj_id][right_touch > self.min_force] = True
-            if profile:
-                timings['loop_gripper_force'] += time.perf_counter() - t3
-            this_loop_gripper_force = time.perf_counter() - t3
+
             prev_qpos = current_qpos
-            if profile:
-                timings['loop_other'] += time.perf_counter() - loop_start - (this_loop_env_step + this_loop_crash_check + this_loop_collision_check + this_loop_gripper_force)
                 
         # if not non_stop:
         # print(f'{all_collision_mask.sum()} collision')
@@ -454,18 +386,11 @@ class MeshWorld:
             # reset to the initial state
             self.all_crash = True
 
-        # Wait up to 20 simulation steps (~1s) for objects to settle.
-        # Send no-op steps (`env.step(None)`) so the physics engine advances
-        # without applying new controls. If `profile` is True, the elapsed
-        # time for this wait is recorded in `timings['post_wait']`.
+        # careful! only wait for 1 second
         not_still_times = 0
-        if profile:
-            _pw_start = time.perf_counter()
         while not_still_times < 20:
             obs, _, _, _, _ = self.env.step(None)
             not_still_times += 1
-        if profile:
-            timings['post_wait'] += time.perf_counter() - _pw_start
 
         obs = copy.deepcopy(obs)
         # joint_angles_list = self.agent.robot.get_qpos()
@@ -488,12 +413,8 @@ class MeshWorld:
             # print('new_quaternions: ', new_quaternions.shape)
             # print('old_quaternion: ', old_quaternion.shape)
 
-            if profile:
-                _ot0 = time.perf_counter()
             rotation_quaternions = compute_quaternion_rotation_batch(old_quaternion, new_quaternions)
             transformations[:, 3:7] = rotation_quaternions
-            if profile:
-                timings['object_transform'] += time.perf_counter() - _ot0
 
             object_states.append(states)
             object_transformations.append(transformations)
@@ -523,21 +444,13 @@ class MeshWorld:
                 images, depth_images = self.render_image_depth(obs)
                 if need_info:
                     infos = self.get_info_by_name()
-                    if profile:
-                        _print_timings()
                     return joint_angles_list, action_object_transformations, images, depth_images, infos
-                if profile:
-                    _print_timings()
                 return joint_angles_list, action_object_transformations, images, depth_images
             
             if need_info:
                 infos = self.get_info_by_name()
-                if profile:
-                    _print_timings()
                 return joint_angles_list, action_object_transformations, infos
 
-            if profile:
-                _print_timings()
             return joint_angles_list, action_object_transformations
         
         post_samples = samples * collision[:, None]
@@ -559,42 +472,26 @@ class MeshWorld:
                     grasp_depth_images = None
                 if need_info:
                     infos = self.get_info_by_name()
-                    if profile:
-                        _print_timings()
                     return joint_angles_list, action_object_transformations, post_samples, images, depth_images, grasp_object_transformations, grasp_images, grasp_depth_images, is_grasping, infos
-                if profile:
-                    _print_timings()
                 return joint_angles_list, action_object_transformations, post_samples, images, depth_images, grasp_object_transformations, grasp_images, grasp_depth_images, is_grasping
             
             if try_release:
                 release_images, release_depth_images = self.render_image_depth(release_obs)
                 if need_info:
                     infos = self.get_info_by_name()
-                    if profile:
-                        _print_timings()
                     return joint_angles_list, action_object_transformations, post_samples, images, depth_images, release_object_transformations, release_images, release_depth_images, infos
-                if profile:
-                    _print_timings()
                 return joint_angles_list, action_object_transformations, post_samples, images, depth_images, release_object_transformations, release_images, release_depth_images
 
             if need_info:
                 infos = self.get_info_by_name()
-                if profile:
-                    _print_timings()
                 return joint_angles_list, action_object_transformations, post_samples, images, depth_images, infos
 
-            if profile:
-                _print_timings()
             return joint_angles_list, action_object_transformations, post_samples, images, depth_images
         
         if need_info:
             infos = self.get_info_by_name()
-            if profile:
-                _print_timings()
             return joint_angles_list, action_object_transformations, post_samples, infos
 
-        if profile:
-            _print_timings()
         return joint_angles_list, action_object_transformations, post_samples
 
     def reset(self):
@@ -871,7 +768,7 @@ class MeshWorld:
 
         return images, depth_images
     
-    def get_loop_gripper_force(self, obj):
+    def get_gripper_force(self, obj):
         ''' get gripper force '''
         left_link, right_link = self.agent.get_finger_links()
         left_force = torch.norm(self.env.unwrapped.scene.get_pairwise_contact_forces(left_link, obj), dim=1).cpu()
@@ -992,7 +889,7 @@ class MeshWorld:
 
             # check touch
             for obj_id, obj in enumerate(self.env.unwrapped.objects):
-                left_touch, right_touch = self.get_loop_gripper_force(obj)
+                left_touch, right_touch = self.get_gripper_force(obj)
 
                 touched[obj_id][left_touch > self.min_force] = True
                 touched[obj_id][right_touch > self.min_force] = True

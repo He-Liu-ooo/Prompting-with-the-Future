@@ -1,6 +1,10 @@
 __pycache__/
 results/
+profiling_results/
 gaussians/__pycache__/
 gaussians/data/
 gaussians/output/
 .vscode/
+pytorch_src/
+SAPIEN/
+PhysX/

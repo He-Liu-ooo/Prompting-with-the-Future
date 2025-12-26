@@ -1,3 +1,5 @@
+from datetime import datetime
+import contextlib
 import os
 import torch
 import matplotlib.pyplot as plt
@@ -23,18 +25,26 @@ def robo4d_parse():
     parser.add_argument("--scene_name", type=str, default="basket_world")
     parser.add_argument("--instruction", type=str, default="put the green cucumber into the basket")
     parser.add_argument("--name", type=str, default='demo')
-    parser.add_argument("--image_size", type=int, default=128)
-    parser.add_argument("--total_steps", type=int, default=10)
+    parser.add_argument("--image_size", type=int, default=100)
+    parser.add_argument("--total_steps", type=int, default=2)
+    # parser.add_argument("--total_steps", type=int, default=10)
     parser.add_argument("--camera_view_id", type=int, default=1)
     parser.add_argument("--plane_action", action="store_true")
-    parser.add_argument("--cem_iteration", type=int, default=3)
+    parser.add_argument("--cem_iteration", type=int, default=1)
+    # parser.add_argument("--cem_iteration", type=int, default=3)
     parser.add_argument("--num_sample_each_group", type=int, default=6)
     parser.add_argument("--num_sample_actions", type=int, default=81)
     parser.add_argument("--num_sample_vlm", type=int, default=36)
     parser.add_argument("--record_video", action="store_true")
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--try_release", action="store_true")
-    parser.add_argument("--replan", action="store_true")
+    parser.add_argument("--replan", type=bool, default=False)
+    # parser.add_argument("--replan", action="store_true")
+    
+    parser.add_argument("--enable_torch_profiler", type=bool, default=False)
+    parser.add_argument("--torch_profiler_dir", type=str, default="profiling_results")
+    parser.add_argument("--try_times", type=int, default=1)
+    # parser.add_argument("--try_times", type=int, default=5)
     return parser
 
 parser = robo4d_parse()
@@ -93,7 +103,7 @@ radius = gaussian_world.radius * distance
 change = None
 close_gripper = False
 times = 0
-while change is None and times < 5:
+while change is None and times < args.try_times:
     try:
         times += 1
         content = generate_close_gripper(close_gripper_prompt)
@@ -197,7 +207,7 @@ for i in range(len(current_images)):
 
 subgoals = None
 try_time = 0
-while subgoals is None and try_time < 5:
+while subgoals is None and try_time < args.try_times:
     try_time += 1
     try:
         content = generate_subgoals(encoded_images, subgoal_prompt)
@@ -223,6 +233,28 @@ subgoal_id = 0
 view_id = args.camera_view_id
 object_states = []
 object_transformations = []
+
+if args.enable_torch_profiler:
+    # append timestamped subfolder to torch_profiler_dir
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    torch_profiler_dir = os.path.join(args.torch_profiler_dir, timestamp)
+    os.makedirs(torch_profiler_dir, exist_ok=True)
+    prof_cm = torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=0, warmup=1, active=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(torch_profiler_dir, worker_name="worker0"),
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+        with_flops=False,
+        with_modules=True
+    )
+else:
+    prof_cm = contextlib.nullcontext()
+
 while len(trajectory) <= args.total_steps:
     grasp = release = False
 
@@ -255,7 +287,7 @@ while len(trajectory) <= args.total_steps:
     """ Check success """
     try_time = 0
     change = None
-    while change is None and try_time < 5:
+    while change is None and try_time < args.try_times:
         try_time += 1
         try:
             content = generate_success(encoded_images, success_prompt)
@@ -273,7 +305,7 @@ while len(trajectory) <= args.total_steps:
         # test again to make sure
         try_time = 0
         change = None
-        while change is None and try_time < 5:
+        while change is None and try_time < args.try_times:
             try_time += 1
             try:
                 content = generate_success(encoded_images, success_prompt)
@@ -285,9 +317,10 @@ while len(trajectory) <= args.total_steps:
 
         if success:
             print('!!! Success !!!')
-            break
+            # TODO
+            # break
     
-    # I think here is duplicated encoding
+    # I think here is duplicated encodings
     encoded_images = []
     for i in range(len(current_images)):
         with open(f'{output_path}/traj_{len(trajectory)}_executed_frame_view_{i + 1}.png', 'rb') as image_file:
@@ -298,7 +331,7 @@ while len(trajectory) <= args.total_steps:
     """ Decide current stage """
     try_time = 0
     change = None
-    while change is None and try_time < 5:
+    while change is None and try_time < args.try_times:
         try_time += 1
         try:
             content = select_stage(encoded_images, stage_prompt, grasping=mesh_world.grasping_now)
@@ -352,7 +385,7 @@ while len(trajectory) <= args.total_steps:
         change = None
         release = False
         try_time = 0
-        while change is None and try_time < 5:
+        while change is None and try_time < args.try_times:
             try_time += 1
             try:
                 content = generate_release(encoded_images, release_prompt)
@@ -387,7 +420,7 @@ while len(trajectory) <= args.total_steps:
     
     chosen_view_id = None
     try_time = 0
-    while chosen_view_id is None and try_time < 5:
+    while chosen_view_id is None and try_time < args.try_times:
         try_time += 1
         try:
             content = simple_select_view(encoded_images, select_prompt)
@@ -434,28 +467,90 @@ while len(trajectory) <= args.total_steps:
     np.fill_diagonal(covariance, variances)
 
     """ Loop to iteratively refine action distribution with CEM and VLM feedback """
-    for iteration in range(args.cem_iteration):
-        prev_time = time.time()
-        prompt = []
+    with prof_cm as prof:
+        for iteration in range(args.cem_iteration):
+            prev_time = time.time()
+            prompt = []
 
-        samples = np.random.multivariate_normal(means, covariance, size=args.num_sample_actions)
-        grasp = False
-        release = False
+            samples = np.random.multivariate_normal(means, covariance, size=args.num_sample_actions)
+            grasp = False
+            release = False
 
-        if not mesh_world.grasping_now:
-            """ Simulate action """
-            # NOTE: mesh world simulation
-            joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images, grasp_object_transformations, grasp_robot_images, grasp_robot_depth_images, is_grasping = mesh_world.sample_action_distribution_batch(samples, try_grasp=True)
-            """ If some samples indicate grasping in simulation world, use VLM to decide whether a true grasp should happen, if yes, break the CEM loop """
-            if is_grasping.sum():
-                print(f'{is_grasping.sum()} could grasp!')
-                grasp_object_transformations = grasp_object_transformations[is_grasping]
-                grasp_robot_images = grasp_robot_images[:, is_grasping]
-                grasp_robot_depth_images = grasp_robot_depth_images[:, is_grasping]
+            if not mesh_world.grasping_now:
+                """ Simulate action """
+                # NOTE: mesh world simulation
+                joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images, grasp_object_transformations, grasp_robot_images, grasp_robot_depth_images, is_grasping = mesh_world.sample_action_distribution_batch(samples, try_grasp=True)
+                """ If some samples indicate grasping in simulation world, use VLM to decide whether a true grasp should happen, if yes, break the CEM loop """
+                if is_grasping.sum():
+                    print(f'{is_grasping.sum()} could grasp!')
+                    grasp_object_transformations = grasp_object_transformations[is_grasping]
+                    grasp_robot_images = grasp_robot_images[:, is_grasping]
+                    grasp_robot_depth_images = grasp_robot_depth_images[:, is_grasping]
+                    rgbmaps, depthmaps, alphamaps = [], [], []
+                    for grasp_id in range(len(grasp_object_transformations)):
+                        # NOTE
+                        rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, object_states=grasp_object_transformations[grasp_id], rotate_num=4)
+                        depthmap[np.where(depthmap == 0)] = zfar
+
+                        rgbmaps.append(rgbmap[:])
+                        depthmaps.append(depthmap[:])
+                        alphamaps.append(alphamap[:])
+
+                    rgbmaps = np.stack(rgbmaps)
+                    depthmaps = np.stack(depthmaps)
+                    alphamaps = np.stack(alphamaps)
+
+                    rgbmaps = rgbmaps.transpose(1, 0, 2, 3, 4)
+                    depthmaps = depthmaps.transpose(1, 0, 2, 3)
+                    alphamaps = alphamaps.transpose(1, 0, 2, 3)
+
+                    robot_mask = np.where((np.any(grasp_robot_images != 0, axis=-1)) * (grasp_robot_depth_images[..., 0] < depthmaps), 1, 0)
+                    images = np.where(robot_mask[:, :, :, :, None], grasp_robot_images, rgbmaps)
+
+                    for grasp_id in range(len(grasp_object_transformations)):
+                        img_views = images[:, grasp_id]
+                        # print('img_views: ', img_views.shape)
+                        encoded_images = []
+                        for idx, img in enumerate(img_views):
+                            plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', img)
+                            # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', img)
+                            with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                            # with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                                encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+                            encoded_images.append(encoded_image)
+
+                        change = None
+                        try_time = 0
+                        while change is None and try_time < args.try_times:
+                            try_time += 1
+                            try:
+                                content = generate_grasp(encoded_images, grasp_prompt)
+                                grasp = get_grasp(content)
+                                change = True
+                            except Exception as e:
+                                print('catched', e)
+                                pass
+                        
+                        with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_content.txt', 'w') as f:
+                        # with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_content.txt', 'w') as f:
+                            f.write(content)
+
+                        if grasp:
+                            means = post_samples[is_grasping][grasp_id]
+                            break
+                    if grasp:
+                        break
+
+            elif args.try_release and mesh_world.grasping_now and subgoal_id == len(subgoals) - 1:
+                """ Simulate action """
+                """ If this is the last subgoal and already grasping, try release, use VLM to decide whether a true release should happen, if yes, break the CEM loop """
+                # NOTE
+                joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images, release_object_transformations, release_robot_images, release_robot_depth_images = mesh_world.sample_action_distribution_batch(samples, try_release=True)
+
                 rgbmaps, depthmaps, alphamaps = [], [], []
-                for grasp_id in range(len(grasp_object_transformations)):
+                for release_id in range(len(release_object_transformations)):
                     # NOTE
-                    rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, object_states=grasp_object_transformations[grasp_id], rotate_num=4)
+                    rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, object_states=release_object_transformations[release_id], rotate_num=4)
                     depthmap[np.where(depthmap == 0)] = zfar
 
                     rgbmaps.append(rgbmap[:])
@@ -470,85 +565,113 @@ while len(trajectory) <= args.total_steps:
                 depthmaps = depthmaps.transpose(1, 0, 2, 3)
                 alphamaps = alphamaps.transpose(1, 0, 2, 3)
 
-                robot_mask = np.where((np.any(grasp_robot_images != 0, axis=-1)) * (grasp_robot_depth_images[..., 0] < depthmaps), 1, 0)
-                images = np.where(robot_mask[:, :, :, :, None], grasp_robot_images, rgbmaps)
+                robot_mask = np.where((np.any(release_robot_images != 0, axis=-1)) * (release_robot_depth_images[..., 0] < depthmaps), 1, 0)
+                images = np.where(robot_mask[:, :, :, :, None], release_robot_images, rgbmaps)
 
-                for grasp_id in range(len(grasp_object_transformations)):
-                    img_views = images[:, grasp_id]
-                    # print('img_views: ', img_views.shape)
+                processes = []
+                queue = multiprocessing.Queue()
+                best_of_each_group = []
+                for release_id in range(len(release_object_transformations)):
+                    img_views = images[:, release_id]
                     encoded_images = []
                     for idx, img in enumerate(img_views):
-                        plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', img)
-                        # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', img)
-                        with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
-                        # with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                        # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', img)
+                        plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', img)
+                        with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
+                        # with open(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
                             encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
-                        encoded_images.append(encoded_image)
+                        encoded_images.append([encoded_image])
 
-                    change = None
-                    try_time = 0
-                    while change is None and try_time < 5:
-                        try_time += 1
-                        try:
-                            content = generate_grasp(encoded_images, grasp_prompt)
-                            grasp = get_grasp(content)
-                            change = True
-                        except Exception as e:
-                            print('catched', e)
-                            pass
-                    
-                    with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_grasp_{grasp_id + 1}_content.txt', 'w') as f:
-                    # with open(f'{output_path}/{len(trajectory)}_{iteration}_grasp_{grasp_id + 1}_content.txt', 'w') as f:
+                    p = multiprocessing.Process(target=prompt_release_helper, args=(release_id, queue, encoded_images, release_prompt, args))
+                    processes.append(p)
+                    p.start()
+
+                for p in processes:
+                    p.join()
+
+                for p in processes:
+                    release_id, release, content = queue.get()
+
+                    with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_{release_id + 1}_release.txt', 'w') as f:
+                    # with open(f'{output_path}/{len(trajectory)}_{iteration}_{release_id + 1}_release.txt', 'w') as f:
                         f.write(content)
-
-                    if grasp:
-                        means = post_samples[is_grasping][grasp_id]
+                    if release:
+                        means = post_samples[release_id]
+                        print('release!')
                         break
-                if grasp:
+                if release:
                     break
 
-        elif args.try_release and mesh_world.grasping_now and subgoal_id == len(subgoals) - 1:
-            """ Simulate action """
-            """ If this is the last subgoal and already grasping, try release, use VLM to decide whether a true release should happen, if yes, break the CEM loop """
-            # NOTE
-            joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images, release_object_transformations, release_robot_images, release_robot_depth_images = mesh_world.sample_action_distribution_batch(samples, try_release=True)
+            else:
+                """ Simulate action """
+                # NOTE
+                joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images = mesh_world.sample_action_distribution_batch(samples)
+                # joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images = mesh_world.sample_action_distribution_batch(samples, profile=True)
+            
+            robot_images = robot_images[view_id]
+            robot_depth_images = robot_depth_images[view_id]
+
+            if args.num_sample_actions > args.num_sample_vlm:
+                joint_angles_list = joint_angles_list[: args.num_sample_vlm]
+                action_object_transformations = action_object_transformations[: args.num_sample_vlm]
+                post_samples = post_samples[: args.num_sample_vlm]
+                robot_images = robot_images[: args.num_sample_vlm]
+                robot_depth_images = robot_depth_images[: args.num_sample_vlm]
+
+            print('trajectory step: ', len(trajectory), ', cem iteration: ', iteration, ', simulate time: ', time.time() - prev_time)
+            prev_time = time.time()
 
             rgbmaps, depthmaps, alphamaps = [], [], []
-            for release_id in range(len(release_object_transformations)):
+            for act_id, joint_angles in enumerate(joint_angles_list):
                 # NOTE
-                rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian_fixed, T_gaussian_fixed, image_size, -FoV / 180.0 * np.pi, device, object_states=release_object_transformations[release_id], rotate_num=4)
+                rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian, T_gaussian, image_size, -FoV / 180.0 * np.pi, device, object_states=action_object_transformations[act_id], rotate_num=1)
                 depthmap[np.where(depthmap == 0)] = zfar
 
-                rgbmaps.append(rgbmap[:])
-                depthmaps.append(depthmap[:])
-                alphamaps.append(alphamap[:])
+                rgbmaps.append(rgbmap[0])
+                depthmaps.append(depthmap[0])
+                alphamaps.append(alphamap[0])
 
             rgbmaps = np.stack(rgbmaps)
             depthmaps = np.stack(depthmaps)
             alphamaps = np.stack(alphamaps)
 
-            rgbmaps = rgbmaps.transpose(1, 0, 2, 3, 4)
-            depthmaps = depthmaps.transpose(1, 0, 2, 3)
-            alphamaps = alphamaps.transpose(1, 0, 2, 3)
+            robot_mask = np.where((np.any(robot_images != 0, axis=-1)) * (robot_depth_images[..., 0] < depthmaps), 1, 0)
+            images = np.where(robot_mask[:, :, :, None], robot_images, rgbmaps)
 
-            robot_mask = np.where((np.any(release_robot_images != 0, axis=-1)) * (release_robot_depth_images[..., 0] < depthmaps), 1, 0)
-            images = np.where(robot_mask[:, :, :, :, None], release_robot_images, rgbmaps)
+            vis_images = []
+            for act_id, img in enumerate(images):
+                vis_images.append(img.copy())
+                plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_act_{act_id + 1}.png', img)
+                # plt.imsave(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', img)
+                
+                with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_act_{act_id + 1}.png', 'rb') as image_file:
+                # with open(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', 'rb') as image_file:
+                    prompt.append([base64.b64encode(image_file.read()).decode('utf-8')])
+            
+            print('trajectory step: ', len(trajectory), ', cem iteration: ', iteration, ', render time: ', time.time() - prev_time)
+
+            group_num = len(joint_angles_list) // args.num_sample_each_group
+
+            vis_all_images = []
+            for group_id in range(group_num):
+                vis_group_images = vis_images[group_id * args.num_sample_each_group: (group_id + 1) * args.num_sample_each_group]
+                vis_group_images = np.concatenate(vis_group_images, axis=1)
+                vis_all_images.append(vis_group_images)
+            vis_all_images = np.concatenate(vis_all_images, axis=0)
+
+            plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_all.png', vis_all_images)
+            # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_all.png', vis_all_images)
+
+            prev_time = time.time()
 
             processes = []
             queue = multiprocessing.Queue()
             best_of_each_group = []
-            for release_id in range(len(release_object_transformations)):
-                img_views = images[:, release_id]
-                encoded_images = []
-                for idx, img in enumerate(img_views):
-                    # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', img)
-                    plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', img)
-                    with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
-                    # with open(f'{output_path}/{len(trajectory)}_{iteration}_release_{release_id + 1}_view_{idx + 1}.png', 'rb') as image_file:
-                        encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
-                    encoded_images.append([encoded_image])
+            
+            for group_id in range(group_num):
+                group_prompt = prompt[group_id * args.num_sample_each_group: (group_id + 1) * args.num_sample_each_group]
 
-                p = multiprocessing.Process(target=prompt_release_helper, args=(release_id, queue, encoded_images, release_prompt, args))
+                p = multiprocessing.Process(target=prompt_helper, args=(group_id, queue, group_prompt, system_prompt, mesh_world.grasping_now))
                 processes.append(p)
                 p.start()
 
@@ -556,110 +679,29 @@ while len(trajectory) <= args.total_steps:
                 p.join()
 
             for p in processes:
-                release_id, release, content = queue.get()
+                group_id, answer, content = queue.get()
+                best_id = answer - 1
+                best_of_each_group.append(group_id * args.num_sample_each_group + best_id)
 
-                with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_{release_id + 1}_release.txt', 'w') as f:
-                # with open(f'{output_path}/{len(trajectory)}_{iteration}_{release_id + 1}_release.txt', 'w') as f:
+                with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_group_{group_id}_response.txt', 'w') as f:
+                # with open(f'{output_path}/{len(trajectory)}_{iteration}_{group_id}_response.txt', 'w') as f:
                     f.write(content)
-                if release:
-                    means = post_samples[release_id]
-                    print('release!')
-                    break
-            if release:
-                break
-
-        else:
-            """ Simulate action """
-            # NOTE
-            joint_angles_list, action_object_transformations, post_samples, robot_images, robot_depth_images = mesh_world.sample_action_distribution_batch(samples)
-        
-        robot_images = robot_images[view_id]
-        robot_depth_images = robot_depth_images[view_id]
-
-        if args.num_sample_actions > args.num_sample_vlm:
-            joint_angles_list = joint_angles_list[: args.num_sample_vlm]
-            action_object_transformations = action_object_transformations[: args.num_sample_vlm]
-            post_samples = post_samples[: args.num_sample_vlm]
-            robot_images = robot_images[: args.num_sample_vlm]
-            robot_depth_images = robot_depth_images[: args.num_sample_vlm]
-
-        print('step: ', len(trajectory), 'iteration: ', iteration, 'simulate time: ', time.time() - prev_time)
-        prev_time = time.time()
-
-        rgbmaps, depthmaps, alphamaps = [], [], []
-        for act_id, joint_angles in enumerate(joint_angles_list):
-            # NOTE
-            rgbmap, depthmap, alphamap = gaussian_world.render(R_gaussian, T_gaussian, image_size, -FoV / 180.0 * np.pi, device, object_states=action_object_transformations[act_id], rotate_num=1)
-            depthmap[np.where(depthmap == 0)] = zfar
-
-            rgbmaps.append(rgbmap[0])
-            depthmaps.append(depthmap[0])
-            alphamaps.append(alphamap[0])
-
-        rgbmaps = np.stack(rgbmaps)
-        depthmaps = np.stack(depthmaps)
-        alphamaps = np.stack(alphamaps)
-
-        robot_mask = np.where((np.any(robot_images != 0, axis=-1)) * (robot_depth_images[..., 0] < depthmaps), 1, 0)
-        images = np.where(robot_mask[:, :, :, None], robot_images, rgbmaps)
-
-        vis_images = []
-        for act_id, img in enumerate(images):
-            vis_images.append(img.copy())
-            plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_act_{act_id + 1}.png', img)
-            # plt.imsave(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', img)
             
-            with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_act_{act_id + 1}.png', 'rb') as image_file:
-            # with open(f'{output_path}/{len(trajectory)}_{act_id + 1}.png', 'rb') as image_file:
-                prompt.append([base64.b64encode(image_file.read()).decode('utf-8')])
-        
-        print('iteration: ', iteration, 'render time: ', time.time() - prev_time)
+            elite_samples = post_samples[best_of_each_group]
+            means = np.mean(elite_samples, axis=0)
+            covariance = np.cov(elite_samples, rowvar=False)
 
-        group_num = len(joint_angles_list) // args.num_sample_each_group
-
-        vis_all_images = []
-        for group_id in range(group_num):
-            vis_group_images = vis_images[group_id * args.num_sample_each_group: (group_id + 1) * args.num_sample_each_group]
-            vis_group_images = np.concatenate(vis_group_images, axis=1)
-            vis_all_images.append(vis_group_images)
-        vis_all_images = np.concatenate(vis_all_images, axis=0)
-
-        plt.imsave(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_all.png', vis_all_images)
-        # plt.imsave(f'{output_path}/{len(trajectory)}_{iteration}_all.png', vis_all_images)
-
-        prev_time = time.time()
-
-        processes = []
-        queue = multiprocessing.Queue()
-        best_of_each_group = []
-        
-        for group_id in range(group_num):
-            group_prompt = prompt[group_id * args.num_sample_each_group: (group_id + 1) * args.num_sample_each_group]
-
-            p = multiprocessing.Process(target=prompt_helper, args=(group_id, queue, group_prompt, system_prompt, mesh_world.grasping_now))
-            processes.append(p)
-            p.start()
-
-        for p in processes:
-            p.join()
-
-        for p in processes:
-            group_id, answer, content = queue.get()
-            best_id = answer - 1
-            best_of_each_group.append(group_id * args.num_sample_each_group + best_id)
-
-            with open(f'{output_path}/traj_{len(trajectory)}_cem_{iteration}_group_{group_id}_response.txt', 'w') as f:
-            # with open(f'{output_path}/{len(trajectory)}_{iteration}_{group_id}_response.txt', 'w') as f:
-                f.write(content)
-        
-        elite_samples = post_samples[best_of_each_group]
-        means = np.mean(elite_samples, axis=0)
-        covariance = np.cov(elite_samples, rowvar=False)
-
-        print('iteration: ', iteration, 'prompt time: ', time.time() - prev_time)
-        start_time = time.time()
+            print('trajectory step: ', len(trajectory), ', cem iteration: ', iteration, ', prompt time: ', time.time() - prev_time)
+            start_time = time.time()
+            
+            if args.enable_torch_profiler:
+                try:
+                    prof.step()
+                except Exception:
+                    pass
 
     """ Use mesh simulation to replace real-world execution """
+    prev_time = time.time()
     joint_angles_list, action_object_transformations, robot_images, robot_depth_images = mesh_world.sample_action_distribution_batch(means[None], non_stop=True)
 
     # save actions
@@ -679,6 +721,11 @@ while len(trajectory) <= args.total_steps:
         output_actions.append('release')
         output_actions.append(joint_angles_list[0].cpu().numpy().tolist())
 
+    print('trajectory step: ', len(trajectory), ', simulate (real world updated) time: ', time.time() - prev_time)
+    prev_time = time.time()
+    
+    
+    """ Append executed frames (real-world) """        
     if args.record_video:
         mesh_world.env.flush_video()
 
@@ -730,7 +777,10 @@ while len(trajectory) <= args.total_steps:
                 output_actions = output_actions[:-1]
                 mesh_world.history_states = mesh_world.history_states[:-1]
                 replan_time += 1
-    
+
+    # TODO
+    break
+            
 # concatenate excute_frames to one image and save it
 blank_line = np.ones((image_size, image_size // 20, 3))
 for i in range(len(excute_frames)):
